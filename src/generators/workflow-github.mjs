@@ -1,3 +1,5 @@
+import { coverageCommand } from './coverage.mjs';
+
 /**
  * Generates the GitHub Actions workflow YAML for the quality gate.
  *
@@ -89,15 +91,10 @@ export function generateGithubWorkflow(config) {
           ${eslintRun}`);
   }
 
-  // Coverage step
+  // Coverage step — force the json-summary report into reports/coverage so the
+  // gate finds it regardless of the project's vitest/jest config.
   if (hasCoverage) {
-    const covScript = testCoverageScript
-      ? `${runCmd} ${testCoverageScript}`
-      : testRunner === 'vitest'
-        ? 'npx vitest run --coverage'
-        : testRunner === 'jest'
-          ? 'npx jest --coverage'
-          : `${runCmd} test`;
+    const covScript = coverageCommand({ testRunner, runCmd, testCoverageScript });
     steps.push(`
       - name: Run tests with coverage
         run: |

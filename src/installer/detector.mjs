@@ -56,8 +56,11 @@ export function detectProject(rootDir) {
   }
 
   // --- Coverage report path ---
+  // We force the coverage tools (vitest/jest) to emit the json-summary report
+  // into reports/coverage via CLI flags, so the gate reads a deterministic path
+  // regardless of the user's vitest/jest config. See the generators for details.
   let coverageReportPath = 'coverage/coverage-summary.json';
-  if (testRunner === 'vitest') {
+  if (testRunner === 'vitest' || testRunner === 'jest') {
     coverageReportPath = 'reports/coverage/coverage-summary.json';
   }
 

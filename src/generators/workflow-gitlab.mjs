@@ -1,3 +1,5 @@
+import { coverageCommand } from './coverage.mjs';
+
 /**
  * Generates the GitLab CI YAML for the quality gate.
  *
@@ -66,13 +68,7 @@ export function generateGitlabWorkflow(config) {
 
   // --- test job ---
   if (hasCoverage) {
-    const covScript = testCoverageScript
-      ? `${runCmd} ${testCoverageScript}`
-      : testRunner === 'vitest'
-        ? 'npx vitest run --coverage'
-        : testRunner === 'jest'
-          ? 'npx jest --coverage'
-          : `${runCmd} test`;
+    const covScript = coverageCommand({ testRunner, runCmd, testCoverageScript });
 
     jobs.push(`test:
   stage: test

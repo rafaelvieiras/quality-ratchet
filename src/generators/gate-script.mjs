@@ -1,3 +1,5 @@
+import { coverageCommand } from './coverage.mjs';
+
 /**
  * Generates the standalone quality-gate script content for a target project.
  *
@@ -44,8 +46,10 @@ export function generateGateScript(config) {
     ? `npx eslint ${srcDir} --ext ${lintExtensions} --format json --output-file reports/eslint.json || true`
     : `npx eslint ${srcDir} --format json --output-file reports/eslint.json || true`;
 
-  // Coverage path depending on runner
+  // Coverage path depending on runner; derive the output dir for the forced flags.
   const covPath = coverageReportPath ?? 'coverage/coverage-summary.json';
+  const covLastSlash = covPath.lastIndexOf('/');
+  const coverageDir = covLastSlash >= 0 ? covPath.slice(0, covLastSlash) : 'reports/coverage';
 
   // Build metrics definitions (only for selected checks)
   const metricsDefs = [];
@@ -91,11 +95,14 @@ export function generateGateScript(config) {
   if (hasEslint) {
     gatherParts.push(`
   // --- ESLint ---
-  let eslintErrors = 0;
-  let eslintWarnings = 0;
+  // null = report unavailable (missing/unreadable); a numeric 0 means "ran, found none".
+  let eslintErrors = null;
+  let eslintWarnings = null;
   if (existsSync('reports/eslint.json')) {
     try {
       const eslintData = JSON.parse(readFileSync('reports/eslint.json', 'utf8'));
+      eslintErrors = 0;
+      eslintWarnings = 0;
       for (const file of eslintData) {
         eslintErrors   += file.errorCount   ?? 0;
         eslintWarnings += file.warningCount ?? 0;
@@ -118,20 +125,20 @@ export function generateGateScript(config) {
     try {
       const covData = JSON.parse(readFileSync(covPath, 'utf8'));
       const total = covData.total ?? {};
-      metrics.coverage_lines     = total.lines?.pct     ?? 0;
-      metrics.coverage_branches  = total.branches?.pct  ?? 0;
-      metrics.coverage_functions = total.functions?.pct ?? 0;
+      metrics.coverage_lines     = total.lines?.pct     ?? null;
+      metrics.coverage_branches  = total.branches?.pct  ?? null;
+      metrics.coverage_functions = total.functions?.pct ?? null;
     } catch (e) {
       warn('Could not parse coverage report: ' + e.message);
-      metrics.coverage_lines     = 0;
-      metrics.coverage_branches  = 0;
-      metrics.coverage_functions = 0;
+      metrics.coverage_lines     = null;
+      metrics.coverage_branches  = null;
+      metrics.coverage_functions = null;
     }
   } else {
     warn(covPath + ' not found — coverage step may have been skipped');
-    metrics.coverage_lines     = 0;
-    metrics.coverage_branches  = 0;
-    metrics.coverage_functions = 0;
+    metrics.coverage_lines     = null;
+    metrics.coverage_branches  = null;
+    metrics.coverage_functions = null;
   }`);
   }
 
@@ -142,15 +149,15 @@ export function generateGateScript(config) {
   if (existsSync(jscpdReportPath)) {
     try {
       const jscpdData = JSON.parse(readFileSync(jscpdReportPath, 'utf8'));
-      const dupPct = jscpdData?.statistics?.total?.percentage ?? 0;
-      metrics.duplicate_percent = parseFloat(dupPct.toFixed(2));
+      const dupPct = jscpdData?.statistics?.total?.percentage;
+      metrics.duplicate_percent = typeof dupPct === 'number' ? parseFloat(dupPct.toFixed(2)) : null;
     } catch (e) {
       warn('Could not parse jscpd report: ' + e.message);
-      metrics.duplicate_percent = 0;
+      metrics.duplicate_percent = null;
     }
   } else {
     warn(jscpdReportPath + ' not found — jscpd may not have run yet');
-    metrics.duplicate_percent = 0;
+    metrics.duplicate_percent = null;
   }`);
   }
 
@@ -169,14 +176,14 @@ export function generateGateScript(config) {
           if (mutant.status === 'Killed' || mutant.status === 'Timeout') killed++;
         }
       }
-      metrics.mutation_score = total > 0 ? parseFloat(((killed / total) * 100).toFixed(2)) : 0;
+      metrics.mutation_score = total > 0 ? parseFloat(((killed / total) * 100).toFixed(2)) : null;
     } catch (e) {
       warn('Could not parse mutation report: ' + e.message);
-      metrics.mutation_score = 0;
+      metrics.mutation_score = null;
     }
   } else {
     warn(mutationReportPath + ' not found — Stryker may not have run yet');
-    metrics.mutation_score = 0;
+    metrics.mutation_score = null;
   }`);
   }
 
@@ -199,13 +206,13 @@ export function generateGateScript(config) {
       metrics.long_function_violations = longFnViolations;
     } catch (e) {
       warn('Could not parse complexity report: ' + e.message);
-      metrics.complexity_violations    = 0;
-      metrics.long_function_violations = 0;
+      metrics.complexity_violations    = null;
+      metrics.long_function_violations = null;
     }
   } else {
     warn(complexityReportPath + ' not found — complexity scan may not have run yet');
-    metrics.complexity_violations    = 0;
-    metrics.long_function_violations = 0;
+    metrics.complexity_violations    = null;
+    metrics.long_function_violations = null;
   }`);
   }
 
@@ -217,31 +224,35 @@ export function generateGateScript(config) {
     try {
       const auditRaw = JSON.parse(readFileSync(auditReportPath, 'utf8'));
       // npm audit --json format
-      const vulns = auditRaw?.metadata?.vulnerabilities ?? auditRaw?.vulnerabilities ?? {};
-      if (typeof vulns === 'object' && !Array.isArray(vulns)) {
+      const meta = auditRaw?.metadata?.vulnerabilities;
+      if (meta && typeof meta === 'object') {
         // npm v7+ format: { info, low, moderate, high, critical, total }
-        metrics.audit_critical = vulns.critical ?? 0;
-        metrics.audit_high     = vulns.high     ?? 0;
-      } else {
+        metrics.audit_critical = meta.critical ?? 0;
+        metrics.audit_high     = meta.high     ?? 0;
+      } else if (auditRaw?.advisories && typeof auditRaw.advisories === 'object') {
         // Older format: count from advisories
         let crit = 0, high = 0;
-        const advisories = auditRaw?.advisories ?? {};
-        for (const adv of Object.values(advisories)) {
+        for (const adv of Object.values(auditRaw.advisories)) {
           if (adv.severity === 'critical') crit++;
           else if (adv.severity === 'high') high++;
         }
         metrics.audit_critical = crit;
         metrics.audit_high     = high;
+      } else {
+        // Unrecognised shape — never silently report 0 critical vulns.
+        warn('Audit report has an unrecognised shape — treating as unavailable');
+        metrics.audit_critical = null;
+        metrics.audit_high     = null;
       }
     } catch (e) {
       warn('Could not parse audit report: ' + e.message);
-      metrics.audit_critical = 0;
-      metrics.audit_high     = 0;
+      metrics.audit_critical = null;
+      metrics.audit_high     = null;
     }
   } else {
     warn(auditReportPath + ' not found — audit step may have been skipped');
-    metrics.audit_critical = 0;
-    metrics.audit_high     = 0;
+    metrics.audit_critical = null;
+    metrics.audit_high     = null;
   }`);
   }
 
@@ -252,9 +263,9 @@ export function generateGateScript(config) {
     baselineCmds.push(`  execSync(${JSON.stringify(eslintCmd)}, { stdio: 'inherit', shell: true });`);
   }
   if (hasCoverage) {
-    const covScript = testRunner === 'vitest' ? 'vitest run --coverage' : 'jest --coverage';
+    const covScript = coverageCommand({ testRunner, dir: coverageDir });
     baselineCmds.push(`  log('Running tests with coverage...');`);
-    baselineCmds.push(`  execSync('${covScript}', { stdio: 'inherit', shell: true });`);
+    baselineCmds.push(`  execSync(${JSON.stringify(covScript)}, { stdio: 'inherit', shell: true });`);
   }
   if (hasDuplication) {
     baselineCmds.push(`  log('Running jscpd...');`);
@@ -366,7 +377,12 @@ ${baselineCmds.join('\n')}
   log('Current metrics:');
   for (const [key, val] of Object.entries(metrics)) {
     const def = METRIC_DEFS[key];
-    log(\`  \${def?.label ?? key}: \${c.cyan}\${val}\${c.reset} \${def?.unit ?? ''}\`);
+    log(\`  \${def?.label ?? key}: \${c.cyan}\${val === null ? 'N/A' : val}\${c.reset} \${def?.unit ?? ''}\`);
+  }
+  const missing = Object.entries(metrics).filter(([, v]) => v === null).map(([k]) => METRIC_DEFS[k]?.label ?? k);
+  if (missing.length > 0) {
+    warn('Some metrics could not be measured and were stored as null: ' + missing.join(', '));
+    warn('Those tools may not have run. Re-run the baseline once they are configured so it is complete.');
   }
   log('');
 }
@@ -376,13 +392,15 @@ function compareMetrics(current, baseline) {
   const regressions = [];
   const improvements = [];
   const unchanged = [];
+  const unavailable = [];
 
   for (const [key, def] of Object.entries(METRIC_DEFS)) {
     const cur = current[key] ?? null;
     const base = baseline[key] ?? null;
 
     if (cur === null) {
-      unchanged.push({ key, def, cur: 'N/A', base });
+      // Report missing or unreadable — we cannot verify this metric.
+      unavailable.push({ key, def, cur: null, base });
       continue;
     }
     if (base === null) {
@@ -426,7 +444,7 @@ function compareMetrics(current, baseline) {
     }
   }
 
-  return { regressions, improvements, unchanged };
+  return { regressions, improvements, unchanged, unavailable };
 }
 
 // ─── Format helpers ───────────────────────────────────────────────────────────
@@ -442,7 +460,7 @@ function fmtDelta(cur, base, lowerIsBetter) {
 
 // ─── Local (terminal) output ──────────────────────────────────────────────────
 function printLocal(current, result) {
-  const { regressions, improvements, unchanged } = result;
+  const { regressions, improvements, unchanged, unavailable } = result;
   log(\`\${c.bold}Quality Gate — ${projectName}\${c.reset}\\n\`);
 
   if (improvements.length > 0) {
@@ -463,14 +481,21 @@ function printLocal(current, result) {
 
   const blocking = regressions.filter((r) => r.def.blocking !== false);
   const warnings = regressions.filter((r) => r.def.blocking === false);
+  const unavailBlocking = unavailable.filter((u) => u.def.blocking !== false);
+  const unavailWarn = unavailable.filter((u) => u.def.blocking === false);
 
-  if (warnings.length > 0) {
+  if (warnings.length > 0 || unavailWarn.length > 0) {
     log(\`\${c.yellow}Warnings (non-blocking):\${c.reset}\`);
     for (const { def, cur, base } of warnings) {
       log(\`  \${c.yellow}⚠\${c.reset} \${def.label}: \${c.yellow}\${cur} \${def.unit}\${c.reset}  (was \${base} \${def.unit}  \${fmtDelta(cur, base, def.lowerIsBetter)})\`);
     }
+    for (const { def } of unavailWarn) {
+      log(\`  \${c.yellow}⚠\${c.reset} \${def.label}: \${c.yellow}report unavailable\${c.reset} \${c.dim}(metric could not be measured)\${c.reset}\`);
+    }
     log('');
   }
+
+  const failed = blocking.length > 0 || unavailBlocking.length > 0;
 
   if (blocking.length > 0) {
     log(\`\${c.red}\${c.bold}Regressions (BLOCKING):\${c.reset}\`);
@@ -478,7 +503,18 @@ function printLocal(current, result) {
       log(\`  \${c.red}✘\${c.reset} \${def.label}: \${c.red}\${cur} \${def.unit}\${c.reset}  (was \${base} \${def.unit}  \${fmtDelta(cur, base, def.lowerIsBetter)})\`);
     }
     log('');
-    log(\`\${c.red}\${c.bold}Quality gate FAILED.\${c.reset} Fix the regressions above, then run:\`);
+  }
+
+  if (unavailBlocking.length > 0) {
+    log(\`\${c.red}\${c.bold}Reports unavailable (BLOCKING):\${c.reset}\`);
+    for (const { def, base } of unavailBlocking) {
+      log(\`  \${c.red}✘\${c.reset} \${def.label}: \${c.red}report missing or unreadable\${c.reset}  (baseline \${base} \${def.unit}) — ensure this step ran and produced its report\`);
+    }
+    log('');
+  }
+
+  if (failed) {
+    log(\`\${c.red}\${c.bold}Quality gate FAILED.\${c.reset} Fix the issues above, then run:\`);
     log(\`  \${c.cyan}npm run quality:gate:local\${c.reset}\\n\`);
     return false;
   }
@@ -489,10 +525,10 @@ function printLocal(current, result) {
 
 // ─── CI (Markdown) output ─────────────────────────────────────────────────────
 function printMarkdown(current, result) {
-  const { regressions, improvements, unchanged } = result;
+  const { regressions, improvements, unchanged, unavailable } = result;
   const blocking = regressions.filter((r) => r.def.blocking !== false);
-  const warnings = regressions.filter((r) => r.def.blocking === false);
-  const passed = blocking.length === 0;
+  const unavailBlocking = unavailable.filter((u) => u.def.blocking !== false);
+  const passed = blocking.length === 0 && unavailBlocking.length === 0;
   const status = passed ? '✅ Quality Gate PASSED' : '❌ Quality Gate FAILED';
 
   const lines = [];
@@ -508,17 +544,20 @@ function printMarkdown(current, result) {
   lines.push('| Metric | Current | Baseline | Delta | Status |');
   lines.push('|--------|---------|----------|-------|--------|');
 
-  const allRows = [...improvements, ...unchanged, ...regressions];
+  const allRows = [...improvements, ...unchanged, ...regressions, ...unavailable];
   for (const { key, def, cur, base } of allRows) {
     const delta = (typeof cur === 'number' && typeof base === 'number')
       ? fmtDelta(cur, base, def.lowerIsBetter)
       : '—';
     let statusIcon = '➡️';
     if (improvements.some((i) => i.key === key)) statusIcon = '✅';
+    else if (unavailable.some((u) => u.key === key)) statusIcon = def.blocking !== false ? '❌' : '⚠️';
     else if (regressions.some((r) => r.key === key)) {
       statusIcon = def.blocking !== false ? '❌' : '⚠️';
     }
-    lines.push(\`| \${def.label} | \${cur} \${def.unit} | \${base} \${def.unit} | \${delta} | \${statusIcon} |\`);
+    const curCell  = cur  === null || cur  === undefined ? 'N/A' : \`\${cur} \${def.unit}\`;
+    const baseCell = base === null || base === undefined || base === 'N/A' ? 'N/A' : \`\${base} \${def.unit}\`;
+    lines.push(\`| \${def.label} | \${curCell} | \${baseCell} | \${delta} | \${statusIcon} |\`);
   }
   lines.push('');
 
@@ -530,6 +569,17 @@ function printMarkdown(current, result) {
     }
     lines.push('');
     lines.push('> Fix these regressions before merging, then run \`npm run quality:baseline\` if the new values are intentional.');
+    lines.push('');
+  }
+
+  if (unavailBlocking.length > 0) {
+    lines.push('### ❌ Reports Unavailable');
+    lines.push('');
+    for (const { def, base } of unavailBlocking) {
+      lines.push(\`- **\${def.label}**: report missing or unreadable (baseline \${base} \${def.unit}). Ensure the step ran and produced its report.\`);
+    }
+    lines.push('');
+    lines.push('> A required metric could not be measured, so the gate cannot pass. This is treated as a failure rather than silently ignored.');
     lines.push('');
   }
 
